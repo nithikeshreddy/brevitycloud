@@ -40,3 +40,24 @@
 
 For detailed setup instructions, usage scenarios, and development information, please see the **[USER MANUAL](USER-MANUAL.md)**.
 
+## Request observability
+
+The summary/chat Lambda writes JSON events to its existing CloudWatch Logs stream,
+including `request_started`, `retrieval_started`/`retrieval_completed`,
+`bedrock_invocation_started`/`bedrock_invocation_completed`, `request_completed`,
+and stage-specific errors. Filter by `request_id` to follow an invocation: this is
+Lambda's AWS request ID, or a generated UUID when running without Lambda context.
+The same handler also logs history, preflight, and rejected requests.
+
+Completion events include `duration_ms` measured with a monotonic clock; request
+completion also includes the existing HTTP `status_code`. Request duration covers
+authentication, indexing waits, retrieval, generation, and history storage.
+Retrieval timing covers each `query_kendra` call (including S3 fallback), so retries
+produce multiple event pairs. Operation outcomes are `returned`, `no_result`, or
+`error` (an escaping exception); `returned` can include fallback content. Handled
+service failures emit separate error events even if the request ultimately returns
+HTTP 200. A Lambda timeout or process termination can prevent completion logging.
+
+Logs exclude request/response bodies, prompts, document content, URLs, user IDs,
+credentials, and tokens. Errors record only exception class names, without exception
+messages or tracebacks. No additional dependencies or infrastructure are required.

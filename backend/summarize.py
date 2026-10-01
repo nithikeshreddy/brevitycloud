@@ -5,7 +5,7 @@ import time
 import re
 import decimal
 from clean_text import clean_text, extract_main_content
-from logger import logger
+from logger import log_event, observe_operation, observe_request
 from kendra_indexing import generate_document_id, split_into_chunks, index_in_kendra, query_kendra
 from s3_helper import generate_url_hash, check_document_exists, store_document, get_document
 
@@ -51,9 +51,10 @@ def verify_token(token):
 
         }
     except Exception as e:
-        logger.error(f"Token verification error: {str(e)}")
+        log_event("auth_error", level="error", error_type=type(e).__name__)
         return None
 
+@observe_operation("bedrock_invocation")
 def call_bedrock(prompt, max_tokens=MAX_TOKENS, temperature=TEMPERATURE):
     """Make a call to Bedrock's Claude model"""
     try:
@@ -84,7 +85,7 @@ def call_bedrock(prompt, max_tokens=MAX_TOKENS, temperature=TEMPERATURE):
                     return content.get('text', '').strip()
         return ''
     except Exception as e:
-        logger.error(f"Bedrock API error: {str(e)}", exc_info=True)
+        log_event("bedrock_error", level="error", error_type=type(e).__name__)
         return None
 
 def handle_summarize(cleaned_text, title, url, kendra_index_id=None, use_kendra=True):
@@ -98,7 +99,7 @@ def handle_summarize(cleaned_text, title, url, kendra_index_id=None, use_kendra=
         kendra_used = False
         
         if kendra_index_id and use_kendra:
-            logger.info(f"Using Kendra")
+            log_event("kendra_selected")
             try:
                 doc_id = url_hash
                 
@@ -106,7 +107,7 @@ def handle_summarize(cleaned_text, title, url, kendra_index_id=None, use_kendra=
                     chunks = split_into_chunks(cleaned_text)
                     index_responses = index_in_kendra(chunks, doc_id, url, kendra_index_id)
                     
-                    logger.info("Waiting for Kendra indexing to complete...")
+                    log_event("indexing_wait_started")
                     
                     max_retries = 5
                     base_wait_time = 5  # Start with 5 seconds
@@ -118,25 +119,25 @@ def handle_summarize(cleaned_text, title, url, kendra_index_id=None, use_kendra=
                         try:
                             test_query = query_kendra(doc_id, kendra_index_id)
                             if test_query:
-                                logger.info(f"Kendra indexing complete after {wait_time} seconds")
+                                log_event("indexing_ready")
                                 break
                             else:
-                                logger.info(f"Kendra indexing still in progress, retry {retry+1}/{max_retries}")
+                                log_event("indexing_retry")
                         except Exception as e:
-                            logger.warning(f"Error checking Kendra indexing status: {str(e)}")
+                            log_event("indexing_check_error", level="warning", error_type=type(e).__name__)
                 
                 kendra_text = query_kendra(doc_id, kendra_index_id)
                 
                 if kendra_text:
                     kendra_used = True
                 else:
-                    logger.warning("Kendra indexing appears to be incomplete. No results returned.")
+                    log_event("retrieval_empty", level="warning")
                     
                     if use_kendra:
                         raise ValueError("Kendra indexing requested but no results available")
             
             except Exception as e:
-                logger.error(f"Kendra processing error: {str(e)}", exc_info=True)
+                log_event("kendra_processing_error", level="error", error_type=type(e).__name__)
                 
                 if use_kendra:
                     raise ValueError(f"Kendra processing failed: {str(e)}")
@@ -145,7 +146,7 @@ def handle_summarize(cleaned_text, title, url, kendra_index_id=None, use_kendra=
         
         if not kendra_used and not use_kendra:
             # Create summarization prompt for Bedrock
-            logger.info(f"Using Bedrock")
+            log_event("bedrock_selected")
             prompt = f"""Please provide a concise summary of the following text in 3-5 sentences, focusing on the main points:
 
 {summarization_text}
@@ -183,7 +184,7 @@ Please provide a clear, well-structured summary that captures the essential info
             raise ValueError("Kendra processing was requested but failed")
 
     except Exception as e:
-        logger.error(f"Summarization error: {str(e)}", exc_info=True)
+        log_event("summarization_error", level="error", error_type=type(e).__name__)
         raise
 
 def handle_chat(query, context, url=None, kendra_index_id=None, use_kendra=True):
@@ -205,7 +206,7 @@ def handle_chat(query, context, url=None, kendra_index_id=None, use_kendra=True)
         kendra_used = False
         
         if kendra_index_id and context_doc_id and use_kendra:
-            logger.info(f"Using Kendra")
+            log_event("kendra_selected")
             try:
                 indexed_in_kendra = False
                 if url:
@@ -214,7 +215,7 @@ def handle_chat(query, context, url=None, kendra_index_id=None, use_kendra=True)
                         indexed_in_kendra = True
                 
                 if not indexed_in_kendra and url:
-                    logger.info(f"Document {url} not yet indexed in Kendra, waiting for indexing...")
+                    log_event("indexing_wait_started")
                     
                     max_retries = 5
                     base_wait_time = 5  # Start with 5 seconds
@@ -227,25 +228,25 @@ def handle_chat(query, context, url=None, kendra_index_id=None, use_kendra=True)
                         existing_doc = check_document_exists(context_doc_id)
                         if existing_doc and existing_doc.get('indexed_status') == 'complete':
                             indexed_in_kendra = True
-                            logger.info(f"Document now indexed in Kendra after {wait_time} seconds")
+                            log_event("indexing_ready")
                             break
                         else:
-                            logger.info(f"Document indexing still in progress, retry {retry+1}/{max_retries}")
+                            log_event("indexing_retry")
                 
                 # Query Kendra with the specific question
                 kendra_context = query_kendra(context_doc_id, kendra_index_id, query)
                 
                 if kendra_context:
                     kendra_used = True
-                    logger.info("Successfully retrieved context from Kendra")
+                    log_event("context_retrieved")
                 else:
-                    logger.warning("Kendra query returned no results")
+                    log_event("retrieval_empty", level="warning")
                     
                     if use_kendra:
                         raise ValueError("Kendra was requested but no results available")
                 
             except Exception as e:
-                logger.error(f"Kendra query error: {str(e)}", exc_info=True)
+                log_event("kendra_processing_error", level="error", error_type=type(e).__name__)
                 
                 if use_kendra:
                     raise ValueError(f"Kendra processing failed: {str(e)}")
@@ -254,7 +255,7 @@ def handle_chat(query, context, url=None, kendra_index_id=None, use_kendra=True)
         
         # Only proceed with Bedrock if Kendra succeeded or if fallback is allowed
         if kendra_used or not use_kendra:
-            logger.info(f"Using Bedrock")
+            log_event("bedrock_selected")
             # Create chat prompt
             prompt = f"""You are an AI assistant helping with questions about a webpage. Use the following context to answer the user's question. Only use information from the provided context.
 
@@ -277,12 +278,12 @@ Please provide a clear and concise answer based solely on the context provided."
             raise ValueError("Kendra processing was requested but failed")
 
     except Exception as e:
-        logger.error(f"Chat error: {str(e)}", exc_info=True)
+        log_event("chat_error", level="error", error_type=type(e).__name__)
         raise
 
 def get_user_history(user_id):
     """Retrieve user summaries and chat history from DynamoDB."""
-    logger.info(f"Fetching history for user_id: {user_id}")
+    log_event("history_started")
     try:
         response = user_table.get_item(
             Key={'user_id': user_id},
@@ -305,7 +306,7 @@ def get_user_history(user_id):
             reverse=True
         )[:MAX_HISTORY_ITEMS]
         
-        logger.info(f"Found {len(summaries)} summaries and {len(chat_history)} chat items.")
+        log_event("history_loaded")
         
         # *** No need to convert here if using the custom encoder later ***
         # Convert timestamps (optional here, can be handled by encoder)
@@ -322,13 +323,13 @@ def get_user_history(user_id):
         }
         
     except Exception as e:
-        logger.error(f"DynamoDB get_item error for user {user_id}: {str(e)}", exc_info=True)
+        log_event("history_error", level="error", error_type=type(e).__name__)
         # Return empty history on error, or re-raise depending on desired behavior
         return {'summaries': [], 'chat_history': []} 
 
+@observe_request
 def lambda_handler(event, context):
     """Main Lambda handler"""
-    logger.info(f"Event received: {json.dumps(event)}")
     
     headers = {
         'Access-Control-Allow-Origin': '*',
@@ -355,7 +356,7 @@ def lambda_handler(event, context):
         
         # --- Handle GET /history --- 
         if http_method == 'GET' and path.endswith('/history'):
-            logger.info(f"Handling GET /history for user: {user_id}")
+            log_event("history_requested")
             history_data = get_user_history(user_id)
             return {
                 'statusCode': 200,
@@ -381,7 +382,7 @@ def lambda_handler(event, context):
                     
                 # Clean the text
                 cleaned_text = clean_text(content)
-                logger.info(f"Cleaned text length: {len(cleaned_text)}")
+                log_event("text_cleaned")
                 
                 # Get summary
                 summary, used_kendra = handle_summarize(cleaned_text, title, url, kendra_index_id, use_kendra)
@@ -401,9 +402,9 @@ def lambda_handler(event, context):
                             }]
                         }
                     )
-                    logger.info(f"Summary saved for user {user_id}")
+                    log_event("summary_saved")
                 except Exception as e:
-                    logger.error(f"DynamoDB summary save error: {str(e)}")
+                    log_event("summary_save_error", level="error", error_type=type(e).__name__)
 
                 response_body = {'summary': summary, 'used_kendra': used_kendra}
                 
@@ -436,9 +437,9 @@ def lambda_handler(event, context):
                             }]
                         }
                     )
-                    logger.info(f"Chat saved for user {user_id}")
+                    log_event("chat_saved")
                 except Exception as e:
-                     logger.error(f"DynamoDB chat save error: {str(e)}")
+                     log_event("chat_save_error", level="error", error_type=type(e).__name__)
                      
                 response_body = {'response': chat_response, 'used_kendra': used_kendra}
             else:
@@ -451,7 +452,7 @@ def lambda_handler(event, context):
             }
         else:
              # Handle other paths/methods if necessary
-             logger.warning(f"Unhandled request: {http_method} {path}")
+             log_event("route_not_found", level="warning")
              return {
                  'statusCode': 404,
                  'headers': headers,
@@ -459,7 +460,7 @@ def lambda_handler(event, context):
              }
 
     except ValueError as e: # Catch auth/input validation errors specifically
-        logger.error(f"Authorization or input error: {str(e)}", exc_info=True)
+        log_event("request_error", level="error", error_type=type(e).__name__)
         status_code = 400 if "Missing" in str(e) else 401 # 400 for missing, 401 for invalid
         return {
             'statusCode': status_code,
@@ -467,7 +468,7 @@ def lambda_handler(event, context):
             'body': json.dumps({'error': str(e)})
         }
     except Exception as e:
-        logger.error(f"Error processing request: {str(e)}", exc_info=True)
+        log_event("request_error", level="error", error_type=type(e).__name__)
         return {
             'statusCode': 500,
             'headers': headers,

@@ -4,7 +4,7 @@ import json
 import os
 from urllib.parse import urlparse
 import time
-from logger import logger
+from logger import log_event
 
 # Initializing S3 client
 s3 = boto3.client('s3')
@@ -20,7 +20,7 @@ def generate_url_hash(url):
 
 def check_document_exists(url_hash):
     if not S3_BUCKET_NAME:
-        logger.error("S3_BUCKET_NAME environment variable not set")
+        log_event("s3_configuration_error", level="error")
         return None
         
     metadata_key = f"shared/metadata/{url_hash}-meta.json"
@@ -40,12 +40,12 @@ def check_document_exists(url_hash):
             # Document doesn't exist
             return None
         else:
-            logger.error(f"Error checking document existence: {str(e)}")
+            log_event("s3_document_check_error", level="error", error_type=type(e).__name__)
             return None
         
 def store_document(url, title, cleaned_text, raw_text=None):
     if not S3_BUCKET_NAME:
-        logger.error("S3_BUCKET_NAME environment variable not set")
+        log_event("s3_configuration_error", level="error")
         return None
     
     url_hash = generate_url_hash(url)
@@ -90,7 +90,7 @@ def store_document(url, title, cleaned_text, raw_text=None):
                 ContentType='application/json'
             )
             
-            logger.info(f"Updated existing document for URL: {url}")
+            log_event("s3_document_updated")
             return url_hash
             
         else:
@@ -127,16 +127,16 @@ def store_document(url, title, cleaned_text, raw_text=None):
                 ContentType='application/json'
             )
             
-            logger.info(f"Created new document for URL: {url}")
+            log_event("s3_document_created")
             return url_hash
             
     except Exception as e:
-        logger.error(f"Error storing document in S3: {str(e)}")
+        log_event("s3_store_error", level="error", error_type=type(e).__name__)
         return None
     
 def get_document(url_hash):
     if not S3_BUCKET_NAME:
-        logger.error("S3_BUCKET_NAME environment variable not set")
+        log_event("s3_configuration_error", level="error")
         return None
         
     content_key = f"shared/websites/{url_hash}.json"
@@ -162,17 +162,17 @@ def get_document(url_hash):
                 ContentType='application/json'
             )
         except Exception as e:
-            logger.warning(f"Could not update metadata for {url_hash}: {str(e)}")
+            log_event("s3_metadata_update_error", level="warning", error_type=type(e).__name__)
         
         return content_data
         
     except Exception as e:
-        logger.error(f"Error retrieving document from S3: {str(e)}")
+        log_event("s3_retrieve_error", level="error", error_type=type(e).__name__)
         return None
     
 def update_indexed_status(url_hash, status='complete'):
     if not S3_BUCKET_NAME:
-        logger.error("S3_BUCKET_NAME environment variable not set")
+        log_event("s3_configuration_error", level="error")
         return False
         
     metadata_key = f"shared/metadata/{url_hash}-meta.json"
@@ -196,5 +196,5 @@ def update_indexed_status(url_hash, status='complete'):
         return True
         
     except Exception as e:
-        logger.error(f"Error updating indexed status for {url_hash}: {str(e)}")
+        log_event("s3_index_status_error", level="error", error_type=type(e).__name__)
         return False

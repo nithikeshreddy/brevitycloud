@@ -1,7 +1,7 @@
 import hashlib
 import re
 import boto3
-from logger import logger
+from logger import log_event, observe_operation
 from s3_helper import generate_url_hash, update_indexed_status, get_document
 
 def generate_document_id(content, title=""):
@@ -83,7 +83,7 @@ def index_in_kendra(chunks, doc_id, title, index_id):
                 update_indexed_status(url_hash, 'complete')
                 
         except Exception as e:
-            logger.error(f"Error indexing chunk {i}: {str(e)}")
+            log_event("indexing_error", level="error", error_type=type(e).__name__)
             
             # Mark indexing as failed in S3 if URL-based
             if title.startswith(('http://', 'https://')):
@@ -92,6 +92,7 @@ def index_in_kendra(chunks, doc_id, title, index_id):
     
     return responses
 
+@observe_operation("retrieval")
 def query_kendra(doc_id, index_id, query_text="What are the main points and key information in this document?"):
     """Query Kendra for the most relevant content from the document"""
     kendra_client = boto3.client('kendra')
@@ -102,7 +103,7 @@ def query_kendra(doc_id, index_id, query_text="What are the main points and key 
         try:
             s3_content = get_document(doc_id)
         except Exception as e:
-            logger.info(f"Document {doc_id} not found in S3, querying Kendra directly")
+            log_event("s3_document_unavailable")
         
         # If we found the document in S3 and it's already indexed in Kendra,
         # we can use its content directly
@@ -128,10 +129,10 @@ def query_kendra(doc_id, index_id, query_text="What are the main points and key 
                 else:
                     # Document not found in Kendra but exists in S3
                     # Return the cleaned text from S3 directly
-                    logger.info(f"Document {doc_id} found in S3 but not in Kendra, returning S3 content")
+                    log_event("retrieval_s3_fallback")
                     return s3_content.get('cleaned_text')
             except Exception as e:
-                logger.warning(f"Error checking if document exists in Kendra: {str(e)}")
+                log_event("kendra_check_error", level="warning", error_type=type(e).__name__)
                 # If we can't check Kendra, return S3 content as fallback
                 return s3_content.get('cleaned_text')
         
@@ -165,15 +166,15 @@ def query_kendra(doc_id, index_id, query_text="What are the main points and key 
             return None  # No relevant passages found
             
     except Exception as e:
-        logger.error(f"Error querying Kendra: {str(e)}")
+        log_event("kendra_query_error", level="error", error_type=type(e).__name__)
         
         # Try to get content from S3 as a fallback
         try:
             s3_content = get_document(doc_id)
             if s3_content and s3_content.get('cleaned_text'):
-                logger.info(f"Returning S3 content as fallback for document {doc_id}")
+                log_event("retrieval_s3_fallback")
                 return s3_content.get('cleaned_text')
         except Exception as s3_error:
-            logger.error(f"Error retrieving S3 fallback: {str(s3_error)}")
+            log_event("s3_fallback_error", level="error", error_type=type(s3_error).__name__)
             
         return None
